@@ -1,4 +1,3 @@
-
 using System;
 using System.Collections.Concurrent;
 using System.Net;
@@ -10,17 +9,16 @@ namespace PeerRegister
 {
     internal class Program
     {
-        // Хранилище подключённых клиентов: <clientId> -> TcpClient
         private static readonly ConcurrentDictionary<string, TcpClient> Clients =
             new ConcurrentDictionary<string, TcpClient>();
         private static int _cnt = 0;
 
-        // Сразу = 80 (Render), если переменная не установлена → 5000
+        // В Render env‑переменная PORT=5000 (по умолчанию в коде)
         private static readonly int Port =
             int.Parse(Environment.GetEnvironmentVariable("PORT") ?? "5000");
 
-        // Переменная‑флаг для ограничения вывода логов
-        private static DateTime _lastLog = DateTime.MinValue;
+        // Период вывода статистики (10 сек)
+        private static DateTime _lastStat = DateTime.MinValue;
 
         private static void Main()
         {
@@ -31,27 +29,18 @@ namespace PeerRegister
 
             while (true)
             {
-                try
-                {
-                    var client = listener.AcceptTcpClient();
-                    var clientId = $"peer{Interlocked.Increment(ref _cnt)}";
-                    Log($"[{clientId}] connected");
+                var client = listener.AcceptTcpClient();
+                var clientId = $"peer{Interlocked.Increment(ref _cnt)}";
 
-                    // Сохраняем клиент в словарь
-                    Clients[clientId] = client;
+                // Сохраняем клиента
+                Clients[clientId] = client;
 
-                    // Отправляем клиенту свой ID (одно сообщение)
-                    var idMsg = Encoding.ASCII.GetBytes($"ID:{clientId}\n");
-                    client.GetStream().Write(idMsg, 0, idMsg.Length);
+                // Отправляем собственный ID
+                var idMsg = Encoding.ASCII.GetBytes($"ID:{clientId}\n");
+                client.GetStream().Write(idMsg, 0, idMsg.Length);
 
-                    // Создаём поток для обработки дополнительных запросов от клиента
-                    new Thread(() => HandleClient(client, clientId)).Start();
-                }
-                catch (Exception ex)
-                {
-                    // Иначе логируем только если прошло 10 секунд
-                    Log($"Error: {ex.Message}");
-                }
+                // Запускаем поток для обработки запросов от клиента
+                new Thread(() => HandleClient(client, clientId)).Start();
             }
         }
 
@@ -65,23 +54,20 @@ namespace PeerRegister
                 while (true)
                 {
                     var bytesRead = stream.Read(buffer, 0, buffer.Length);
-                    if (bytesRead == 0) break; // клиент разорвал
+                    if (bytesRead == 0) break;   // клиент разорвал
 
-                    // Декодируем принятое сообщение
                     var req = Encoding.ASCII.GetString(buffer, 0, bytesRead).Trim();
 
-                    // Игнорируем типовые проверочные запросы Render: “HEAD / HTTP/1.1”
-                    if (req.StartsWith("HEAD") || req.StartsWith("GET"))
-                        continue;
-
-                    Log($"[{clientId}] => {req}");
+                    // ── Игнорируем проверки Render (HEAD / HTTP/1.1) ─────────────────
+                    if (req.StartsWith("HEAD") || req.StartsWith("GET")) continue;
 
                     if (req == "LIST")
                     {
                         foreach (var kvp in Clients)
                         {
                             var msg = $"peer:{kvp.Key}\n";
-                            stream.Write(Encoding.ASCII.GetBytes(msg), 0, msg.Length);
+                            stream.Write(Encoding.ASCII.GetBytes(msg), 0,
+                                         msg.Length);
                         }
                     }
                     else
@@ -91,27 +77,25 @@ namespace PeerRegister
                     }
                 }
             }
-            catch
-            {
-                // хотя бы пометим отключение
-            }
+            catch { /* игнорируем ошибки чтения */ }
             finally
             {
-                // Удаляем клиент из словаря и закрываем сокет
+                // Удаляем клиент и закрываем сокет
                 Clients.TryRemove(clientId, out _);
                 client.Close();
-                Log($"[{clientId}] disconnected");
+
+                // ── Периодический вывод статистики ───────────────────────
+                if ((DateTime.UtcNow - _lastStat).TotalSeconds >= 10)
+                {
+                    Console.WriteLine(
+                        $"[{DateTime.UtcNow:HH:mm:ss}] { [ClientCount]} реальных подключений");
+                    _lastStat = DateTime.UtcNow;
+                }
             }
         }
 
-        // Лог‑вывод – не чаще чем раз в 10 сек.
-        private static void Log(string m)
-        {
-            if ((DateTime.Now - _lastLog).TotalSeconds >= 10)
-            {
-                Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss}] {m}");
-                _lastLog = DateTime.Now;
-            }
-        }
+        private static int ClientCount => Clients.Count;
+
+        private static void Log(string msg) => Console.WriteLine($"[{msg}]");
     }
 }
