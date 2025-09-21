@@ -9,70 +9,57 @@ namespace PeerRegister
 {
     class Server
     {
-        private static readonly ConcurrentDictionary<string, TcpClient> Clients = new();
-        private static int _counter;
-        private const int Port = 80; // Обязательно 80 для Web Service
+        static ConcurrentDictionary<string, TcpClient> Clients = new();
+        static int clientCounter;
 
         static async Task Main()
         {
-            var listener = new TcpListener(IPAddress.Any, Port);
+            var listener = new TcpListener(IPAddress.Any, 80);
             listener.Start();
-            Console.WriteLine($"[SERVER] Слушаем порт {Port}");
+            Console.WriteLine("Слушаем TCP-порт 80...");
 
             while (true)
             {
                 var client = await listener.AcceptTcpClientAsync();
-                _ = HandleConnection(client);
+                _ = HandleClient(client);
             }
         }
 
-        private static async Task HandleConnection(TcpClient client)
+        static async Task HandleClient(TcpClient client)
         {
             try
             {
                 using (client)
                 using (var stream = client.GetStream())
                 {
-                    var buffer = new byte[4096];
-                    var bytesRead = await stream.ReadAsync(buffer); // Первый пакет
+                    var buffer = new byte[1024];
+                    var bytesRead = await stream.ReadAsync(buffer);
 
-                    var request = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-
-                    // Обработка HTTP-проверок Render
-                    if (request.StartsWith("GET") || request.StartsWith("HEAD"))
+                    // Обработка HTTP Health Check
+                    var req = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    if (req.Contains("GET /health"))
                     {
-                        if (request.Contains("/health")) // Health Check
-                        {
-                            var response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK";
-                            await stream.WriteAsync(Encoding.UTF8.GetBytes(response));
-                        }
-                        else
-                        {
-                            var response = "HTTP/1.1 400 Bad Request\r\n\r\n";
-                            await stream.WriteAsync(Encoding.UTF8.GetBytes(response));
-                        }
-                        return; // Закрываем HTTP-соединение
+                        var response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+                        await stream.WriteAsync(Encoding.UTF8.GetBytes(response));
+                        return;
                     }
 
-                    // Обработка P2P-клиентов
-                    var clientId = $"peer{Interlocked.Increment(ref _counter)}";
-                    Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss}] {clientId} подключен");
-                    Clients.TryAdd(clientId, client);
+                    // Обработка P2P
+                    var clientId = $"peer{Interlocked.Increment(ref clientCounter)}";
+                    Console.WriteLine($"[{clientId}] Подключен");
 
-                    // Отправка ID клиенту
-                    var idResponse = $"ID:{clientId}\n";
-                    await stream.WriteAsync(Encoding.UTF8.GetBytes(idResponse));
+                    // Отправка ID
+                    var idMsg = $"ID:{clientId}\n";
+                    await stream.WriteAsync(Encoding.UTF8.GetBytes(idMsg));
 
-                    // Основной цикл обработки
+                    // Основной цикл
                     while (client.Connected)
                     {
                         bytesRead = await stream.ReadAsync(buffer);
                         if (bytesRead == 0) break;
 
-                        var msg = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
-                        Console.WriteLine($"[{clientId}] Команда: {msg}");
-
-                        if (msg == "LIST")
+                        var cmd = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+                        if (cmd == "LIST")
                         {
                             var peers = string.Join("\n", Clients.Keys.Select(k => $"peer:{k}"));
                             await stream.WriteAsync(Encoding.UTF8.GetBytes(peers + "\n"));
@@ -83,7 +70,7 @@ namespace PeerRegister
             catch { }
             finally
             {
-                Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss}] Клиент отключен");
+                Console.WriteLine($"[{clientId}] Отключен");
             }
         }
     }
