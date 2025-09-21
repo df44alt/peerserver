@@ -3,76 +3,80 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading;
 
 namespace PeerRegister
 {
-    class Server
+    internal class Program
     {
-        static ConcurrentDictionary<string, TcpClient> _clients = new();
-        static int _counter;
-        static readonly int Port = int.Parse(Environment.GetEnvironmentVariable("PORT") ?? "5000");
+        private static readonly ConcurrentDictionary<string, TcpClient> Clients = new();
+        private static int _cnt;
+        private static readonly int Port = int.Parse(Environment.GetEnvironmentVariable("PORT") ?? "5000");
 
         static void Main()
         {
             var listener = new TcpListener(IPAddress.Any, Port);
             listener.Start();
-            Console.WriteLine($"Listening on {GetPublicIP()}:{Port}");
+            Console.WriteLine($"[SERVER] Listening on port {Port}");
 
-            while (true)
+            try
             {
-                var client = listener.AcceptTcpClient();
-                var clientId = $"peer{Interlocked.Increment(ref _counter)}";
-
-                // Игнорируем проверки Render с пустыми подключениями
-                if (client.Available == 0)
+                while (true)
                 {
-                    client.Dispose();
-                    continue;
+                    var client = listener.AcceptTcpClient();
+                    var clientId = $"peer{Interlocked.Increment(ref _cnt)}";
+                    Console.WriteLine($"[SERVER] {clientId} connected");
+
+                    Clients.TryAdd(clientId, client);
+                    new Thread(() => HandleClient(client, clientId)).Start();
                 }
-
-                Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss}] {clientId} connected");
-                _clients.TryAdd(clientId, client);
-
-                _ = Task.Run(() => HandleClient(client, clientId));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SERVER CRASH] {ex}");
             }
         }
 
-        static async Task HandleClient(TcpClient client, string clientId)
+        private static void HandleClient(TcpClient client, string clientId)
         {
             try
             {
-                using (client)
-                using (var stream = client.GetStream())
+                var stream = client.GetStream();
+                var buffer = new byte[1024];
+
+                // Отправка ID клиенту
+                var idMessage = Encoding.UTF8.GetBytes($"ID:{clientId}\n");
+                stream.Write(idMessage);
+
+                while (client.Connected)
                 {
-                    // Отправляем ID
-                    var idMsg = Encoding.UTF8.GetBytes($"ID:{clientId}\n");
-                    await stream.WriteAsync(idMsg);
+                    var bytesRead = stream.Read(buffer);
+                    if (bytesRead == 0) break;
 
-                    var buffer = new byte[4096];
-                    while (client.Connected)
+                    var message = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+                    Console.WriteLine($"[{clientId}] Received: {message}");
+
+                    if (message == "LIST")
                     {
-                        var bytesRead = await stream.ReadAsync(buffer);
-                        if (bytesRead == 0) break;
+                        var response = new StringBuilder();
+                        foreach (var peer in Clients.Keys)
+                            response.AppendLine($"peer:{peer}");
 
-                        var msg = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                        Console.WriteLine($"[{clientId}] Received: {msg.Trim()}");
-
-                        if (msg.Trim() == "LIST")
-                        {
-                            var peers = string.Join("\n", _clients.Keys.Select(k => $"peer:{k}"));
-                            await stream.WriteAsync(Encoding.UTF8.GetBytes(peers + "\n"));
-                        }
+                        var responseBytes = Encoding.UTF8.GetBytes(response.ToString());
+                        stream.Write(responseBytes);
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[{clientId} ERROR] {ex.Message}");
+            }
             finally
             {
-                _clients.TryRemove(clientId, out _);
-                Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss}] {clientId} disconnected");
+                Clients.TryRemove(clientId, out _);
+                client.Dispose();
+                Console.WriteLine($"[SERVER] {clientId} disconnected");
             }
         }
-
-        static string GetPublicIP() => "44.227.217.144"; // Основной IP из списка Render
     }
 }
