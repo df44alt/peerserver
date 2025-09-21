@@ -1,77 +1,26 @@
-using System;
+using System; // Добавьте эту директиву
 using System.Collections.Concurrent;
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
-using System.Threading.Tasks;
+using System.IO;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 
-namespace PeerRegister
+var builder = WebApplication.CreateBuilder(args);
+var app = builder.Build();
+
+var clients = new ConcurrentDictionary<string, string>();
+
+app.MapGet("/health", () => "alive");
+
+app.MapPost("/register", async (HttpRequest req) =>
 {
-    class Server
-    {
-        static ConcurrentDictionary<string, TcpClient> Clients = new();
-        static int clientCounter;
+    var clientId = Guid.NewGuid().ToString()[0..8]; // Теперь Guid распознается
+    var peerAddress = await new StreamReader(req.Body).ReadToEndAsync();
+    clients.TryAdd(clientId, peerAddress.Trim());
+    return Results.Ok(clientId);
+});
 
-        static async Task Main()
-        {
-            var listener = new TcpListener(IPAddress.Any, 80);
-            listener.Start();
-            Console.WriteLine("РЎР»СѓС€Р°РµРј TCP-РїРѕСЂС‚ 80...");
+app.MapGet("/peer/{id}", (string id) =>
+    clients.TryGetValue(id, out var address) ? Results.Ok(address) : Results.NotFound()
+);
 
-            while (true)
-            {
-                var client = await listener.AcceptTcpClientAsync();
-                _ = HandleClient(client);
-            }
-        }
-
-        static async Task HandleClient(TcpClient client)
-        {
-            try
-            {
-                using (client)
-                using (var stream = client.GetStream())
-                {
-                    var buffer = new byte[1024];
-                    var bytesRead = await stream.ReadAsync(buffer);
-
-                    // РћР±СЂР°Р±РѕС‚РєР° HTTP Health Check
-                    var req = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    if (req.Contains("GET /health"))
-                    {
-                        var response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
-                        await stream.WriteAsync(Encoding.UTF8.GetBytes(response));
-                        return;
-                    }
-
-                    // РћР±СЂР°Р±РѕС‚РєР° P2P
-                    var clientId = $"peer{Interlocked.Increment(ref clientCounter)}";
-                    Console.WriteLine($"[{clientId}] РџРѕРґРєР»СЋС‡РµРЅ");
-
-                    // РћС‚РїСЂР°РІРєР° ID
-                    var idMsg = $"ID:{clientId}\n";
-                    await stream.WriteAsync(Encoding.UTF8.GetBytes(idMsg));
-
-                    // РћСЃРЅРѕРІРЅРѕР№ С†РёРєР»
-                    while (client.Connected)
-                    {
-                        bytesRead = await stream.ReadAsync(buffer);
-                        if (bytesRead == 0) break;
-
-                        var cmd = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
-                        if (cmd == "LIST")
-                        {
-                            var peers = string.Join("\n", Clients.Keys.Select(k => $"peer:{k}"));
-                            await stream.WriteAsync(Encoding.UTF8.GetBytes(peers + "\n"));
-                        }
-                    }
-                }
-            }
-            catch { }
-            finally
-            {
-                Console.WriteLine($"[{clientId}] РћС‚РєР»СЋС‡РµРЅ");
-            }
-        }
-    }
-}
+app.Run();
