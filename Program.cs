@@ -9,78 +9,73 @@ namespace PeerRegister
 {
     internal class Program
     {
-        private static readonly ConcurrentDictionary<string, TcpClient> Clients
-            = new ConcurrentDictionary<string, TcpClient>();
-        private static int _cnt = 0;
-        private static readonly int Port
-            = int.Parse(Environment.GetEnvironmentVariable("PORT") ?? "5000");
-        private static DateTime _lastStat = DateTime.MinValue;
+        private static readonly ConcurrentDictionary<string, TcpClient> Clients = new();
+        private static int _cnt;
+        private static readonly int Port = int.Parse(Environment.GetEnvironmentVariable("PORT") ?? "5000");
 
-        private static void Main()
+        static void Main()
         {
             var listener = new TcpListener(IPAddress.Any, Port);
             listener.Start();
-            Console.WriteLine($"[Server] Прослушивание порта {Port}");
-
-            while (true)
-            {
-                var client = listener.AcceptTcpClient();
-                var clientId = $"peer{Interlocked.Increment(ref _cnt)}";
-                Clients[clientId] = client;
-
-                // Отправляем клиенту его ID
-                var idMsg = Encoding.ASCII.GetBytes($"ID:{clientId}\n");
-                client.GetStream().Write(idMsg, 0, idMsg.Length);
-
-                new Thread(() => HandleClient(client, clientId)).Start();
-            }
-        }
-
-        private static void HandleClient(TcpClient client, string clientId)
-        {
-            var stream = client.GetStream();
-            var buffer = new byte[1024];
+            Console.WriteLine($"[SERVER] Listening on port {Port}");
 
             try
             {
                 while (true)
                 {
-                    var bytesRead = stream.Read(buffer, 0, buffer.Length);
+                    var client = listener.AcceptTcpClient();
+                    var clientId = $"peer{Interlocked.Increment(ref _cnt)}";
+                    Console.WriteLine($"[SERVER] {clientId} connected");
+
+                    Clients.TryAdd(clientId, client);
+                    new Thread(() => HandleClient(client, clientId)).Start();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SERVER CRASH] {ex}");
+            }
+        }
+
+        private static void HandleClient(TcpClient client, string clientId)
+        {
+            try
+            {
+                var stream = client.GetStream();
+                var buffer = new byte[1024];
+
+                // Отправка ID клиенту
+                var idMessage = Encoding.UTF8.GetBytes($"ID:{clientId}\n");
+                stream.Write(idMessage);
+
+                while (client.Connected)
+                {
+                    var bytesRead = stream.Read(buffer);
                     if (bytesRead == 0) break;
 
-                    var req = Encoding.ASCII.GetString(buffer, 0, bytesRead).Trim();
+                    var message = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+                    Console.WriteLine($"[{clientId}] Received: {message}");
 
-                    // Игнорируем HTTP-запросы (Render)
-                    if (req.StartsWith("HEAD") || req.StartsWith("GET")) continue;
+                    if (message == "LIST")
+                    {
+                        var response = new StringBuilder();
+                        foreach (var peer in Clients.Keys)
+                            response.AppendLine($"peer:{peer}");
 
-                    if (req == "LIST")
-                    {
-                        foreach (var kvp in Clients)
-                        {
-                            var msg = $"peer:{kvp.Key}\n";
-                            stream.Write(Encoding.ASCII.GetBytes(msg), 0, msg.Length);
-                        }
-                    }
-                    else
-                    {
-                        stream.Write(Encoding.ASCII.GetBytes("UNKNOWN\n"), 0, "UNKNOWN\n".Length);
+                        var responseBytes = Encoding.UTF8.GetBytes(response.ToString());
+                        stream.Write(responseBytes);
                     }
                 }
             }
-            catch { } // Игнорируем ошибки
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[{clientId} ERROR] {ex.Message}");
+            }
             finally
             {
                 Clients.TryRemove(clientId, out _);
-                client.Close();
-
-                // Вывод статистики каждые 10 секунд
-                if ((DateTime.UtcNow - _lastStat).TotalSeconds >= 10)
-                {
-                    Console.WriteLine(
-                        $"[{DateTime.UtcNow:HH:mm:ss}] Активных клиентов: {Clients.Count}" // Исправлено
-                    );
-                    _lastStat = DateTime.UtcNow;
-                }
+                client.Dispose();
+                Console.WriteLine($"[SERVER] {clientId} disconnected");
             }
         }
     }
